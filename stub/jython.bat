@@ -1,0 +1,1 @@
+"C:\Program Files\OpenJDK\jdk-16\bin\java.exe" -Xmx512m -Xss2560k -classpath C:\opt\jython2.7.4\jython.jar;C:\opt\jython2.7.4\bin\ -Dpython.home=C:\opt\jython2.7.4\ -Dpython.executable=jython.exe -Dpython.launcher.uname=windows -Dpython.launcher.tty=true org.python.util.jython
