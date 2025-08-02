@@ -203,6 +203,9 @@ class WebSocketControlHandler:
                     # Let's try to decode what we have for debugging.
 
                 print(f"[WS-CTRL] Received POST body of size: {len(ia_obj)} bytes.")
+
+                with open("POST_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                    file.write(raw_body)
                 
                 # --- Decode ProtocolHeader ---
                 try:

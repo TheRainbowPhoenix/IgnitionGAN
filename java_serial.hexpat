@@ -1,8 +1,11 @@
-#pragma author ChatGPT
+#pragma author "PC, ChatGPT"
 #pragma description Java serialized ServerMessageHeader (dynamic field descriptors)
 #pragma endian big
 #pragma pattern_limit 100000000
+#pragma once
 #include <std/io.pat>
+#include <std/string.pat>
+
 
 using u1 = u8;
 using u2 = u16;
@@ -16,6 +19,54 @@ using f4 = float;
 #define COL_TAG "FFAA55"
 #define COL_LEN "FFF88A"
 #define COL_STR "78F4FA"
+
+// Define the OpCodes as an enumeration for easy identification
+enum OpCode : u32 {
+    OK = 1,
+    PING = 2,
+    MSG_SEND = 3,
+    ERROR = 4,
+    WAIT = 5,
+    SHUTDOWN = 7,
+    ACCESS_DENIED = 8
+};
+
+struct MetroString {
+    be u16 length;
+    if (length > 0) {
+        // char16 is ImHex's type for 2-byte UTF-16 characters
+        char16 value[length];
+    }
+};
+
+struct ProtocolHeader {
+    be u32 magicBytes;
+    be u32 protocolVersion;
+    be u16 messageId;
+    be u32 opCode;
+    be u32 subCode;
+    u8  flags;
+
+    MetroString senderId;
+    MetroString targetAddress;
+    MetroString senderUrl;
+};
+
+struct MetroMessage {
+     be u32 unk1;
+     be u32 unk2;
+};
+
+struct MetroFrame {
+    ProtocolHeader header;
+
+    // Any data that comes after the header is the message body.
+    // For PING frames, this will be empty.
+    if (header.opCode == 3) {
+        MetroMessage msg;
+    }
+};
+
 
 // Outer header (version + length)
 struct JavaStreamHeader {
@@ -170,7 +221,8 @@ struct HashMap {
 } [[name("HashMap serialized entries")]];
 
 struct ServerMessageHeader {
-    ClassDesc classdesc;
+    u1 element_tag;
+    ObjectStreamClassDesc classdesc;
 
     u4 intentVersion;
     JavaString codecName;
@@ -205,9 +257,15 @@ struct ServerRouteDetails {
     // TODO: should be a "each fields => determine what type to read"
     std::print("{}", classdesc.body.fieldCount);
 
-    u4 routeDistance;
-    JavaString routePath;
-    ServerId serverAddress;
+    if (classdesc.body.fieldCount == 3) {
+        u4 routeDistance;
+        JavaString routePath;
+        ServerId serverAddress;
+    } else {
+        u4 routeDistance;
+        ServerId serverAddress;
+    
+    }
 
 };
 
@@ -237,25 +295,25 @@ struct SerializedArray<T> {
 } [[name("Serialized Java Array Instance")]];
 
 
-
-// Top-level envelope
-struct ServerMessageHeaderMessage {
-    JavaStreamHeader header;
-    SerializationStreamHeader magic;
-    ServerMessageHeader smh;
-    // (after this comes instance data)
-} [[name("Serialized ServerMessageHeader envelope")]];
-
 struct ServerRouteDetailsMessage {
     SerializationStreamHeader magic;
     // ServerRouteDetails smh;
     u1 tc_object;              // TC_OBJECT, should be TC_ARRAY
     if (tc_object == TC::TC_ARRAY) {
         SerializedArray<ServerRouteDetails> array;
-    } else {
-        std::print("Invalid type, should be an array")
     }
+} [[name("Serialized ServerRouteDetails[]")]];
+
+
+// Top-level envelope
+struct ServerMessageHeaderMessage {
+    JavaStreamHeader header;
+    SerializationStreamHeader magic;
+    ServerMessageHeader smh;
+    ServerRouteDetailsMessage srd;
+    // (after this comes instance data)
 } [[name("Serialized ServerMessageHeader envelope")]];
 
 // ServerMessageHeaderMessage root @ 0x0;
-ServerRouteDetailsMessage root @ 0x0;
+MetroFrame mf0 @0x05;
+ServerMessageHeaderMessage root @ 0x84;

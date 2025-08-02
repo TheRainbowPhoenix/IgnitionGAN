@@ -31,10 +31,11 @@ class ProtocolHeader:
         self.target_address = ""
 
     @classmethod
-    def decode(cls, raw_bytes):
+    def decode(cls, raw_bytes, stream=None):
         """Decodes a byte string into a ProtocolHeader object."""
         header = cls()
-        stream = io.BytesIO(raw_bytes)
+        if not stream:
+            stream = io.BytesIO(raw_bytes)
 
         # Read the fixed-size part of the header
         magic, version, msg_id, opcode, subcode, flags = struct.unpack('>IIHIIB', stream.read(19))
