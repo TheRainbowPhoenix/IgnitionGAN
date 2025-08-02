@@ -4,7 +4,7 @@ import com.inductiveautomation.metro.api.ServerId;
 import java.io.Serializable;
 
 public class ServerRouteDetails implements Serializable, Comparable<ServerRouteDetails> {
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = -150151089581073111L;
 
     private ServerId serverAddress;
     private int routeDistance;

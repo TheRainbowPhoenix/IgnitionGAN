@@ -2,6 +2,7 @@
 #pragma description Java serialized ServerMessageHeader (dynamic field descriptors)
 #pragma endian big
 #pragma pattern_limit 100000000
+#include <std/io.pat>
 
 using u1 = u8;
 using u2 = u16;
@@ -9,16 +10,23 @@ using u4 = u32;
 using _u8 = u64;
 using f4 = float;
 
+#define COL_CLASSDESC "88CCFF"
+#define COL_FIELD "AAFF88"
+#define COL_ARRAY "DFAEFF"
+#define COL_TAG "FFAA55"
+#define COL_LEN "FFF88A"
+#define COL_STR "78F4FA"
+
 // Outer header (version + length)
 struct JavaStreamHeader {
-    u4 version;
-    u4 object_length;
+    u4 version [[color(COL_LEN)]];
+    u4 object_length [[color(COL_LEN)]];
 } [[name("Outer header (version + length)")]];
 
 // Java serialization magic
 struct SerializationStreamHeader {
-    u2 magic;    // AC ED
-    u2 version;  // 00 05
+    u2 magic    [[color(COL_TAG)]];    // AC ED
+    u2 version  [[color(COL_TAG)]];  // 00 05
 } [[name("Java serialization magic/version")]];
 
 enum TC : u1 {
@@ -36,40 +44,87 @@ enum TC : u1 {
     TC_EXCEPTION        = 0x7B,
     TC_LONGSTRING       = 0x7C,
     TC_PROXYCLASSDESC   = 0x7D,
-    baseWireHandle      = 0x7E
+    TC_ENUM             = 0x7E
+};
+
+enum FieldType : u1 {
+    I = 0x49, // Int
+    L = 0x4C, // Object
+    LBracket = 0x5B // Array
 };
 
 struct JavaString {
-    u1 tag;               // TC_STRING (0x74) or TC_REFERENCE (0x71) etc.
+    u1 tag                                  [[color(COL_STR)]]; // TC_STRING (0x74) or TC_REFERENCE (0x71) etc.
     if (tag == TC::TC_STRING) {
-        u2 length;
-        char value[length] [[string]];
+        u2 length                           [[color(COL_STR)]];
+        char value[length]                  [[color(COL_STR), string]];
     } else if (tag == TC::TC_REFERENCE) {
-        u4 handle;
+        u4 handle                           [[color(COL_STR)]];
     } else if (tag == TC::TC_LONGSTRING) {
-        u8 length;
-        char value[length] [[string]];
+        _u8 length                          [[color(COL_STR)]];
+        char value[length]                  [[color(COL_STR), string]];
     } else if (tag == TC::TC_NULL) {
         // pass
     }
-} [[name("java.lang.String (value or reference)")]];
+} [[comment("java.lang.String (value or reference)")]];
 
-enum FieldType : u1 {
-    I = 0x49,
-    L = 0x4C,
-    LBracket = 0x5B
-};
+struct CString {
+    u2 length                               [[color(COL_STR)]];
+    char bytes[length]                      [[color(COL_STR), string]];
+} [[comment("C String")]];
+
 
 struct FieldInfo {
-    u1 type_code;               // e.g., 'I','L','[', etc.
-    u2 field_name_length;
-    char field_name[field_name_length] [[string]];
+    u1 type_code        [[color(COL_TAG)]];               // e.g., 'I','L','[', etc.
+    CString field_name;
     // if object or array, there is a className1 UTF string
     match (type_code) {
         (FieldType::L): JavaString string;
         (FieldType::LBracket): JavaString string;
     }
 };
+
+struct ClassDescBody {
+    // Only when preceded by TC_CLASSDESC
+    CString class_name;
+    _u8 serialVersionUID    [[color(COL_CLASSDESC)]];
+    u1 classDescFlags       [[color(COL_TAG)]];
+    u2 fieldCount           [[color(COL_LEN)]];
+    FieldInfo fields[fieldCount]    [[color(COL_FIELD)]];
+    // classAnnotations: sequence ending with TC_ENDBLOCKDATA
+    u1 annotation_start     [[color(COL_TAG)]];
+    // consume until TC_ENDBLOCKDATA
+    /* while (annotation_start != TC::TC_ENDBLOCKDATA) {
+        u1 next;
+        annotation_start = next;
+    } */
+    u1 end_block_marker     [[color(COL_TAG)]]; // should be 0x78
+    
+    if (end_block_marker == TC::TC_CLASSDESC) {
+        ClassDescBody sub;
+    }
+    // u1 super_classdesc;
+    // ObjectStreamClassDesc super_classdesc; // recursive: could be null/ref/another classdesc
+} [[name("ClassDescBody")]];
+
+struct ObjectStreamClassDesc {
+    u1 tag      [[color(COL_TAG)]]; // could be TC_NULL, TC_REFERENCE, TC_CLASSDESC, TC_PROXYCLASSDESC
+    if (tag == TC::TC_NULL) {
+        // nothing
+    } else if (tag == TC::TC_REFERENCE) {
+        u4 handle       [[color(COL_LEN)]];
+    } else if (tag == TC::TC_CLASSDESC) {
+        ClassDescBody body  [[color(COL_CLASSDESC)]];
+    } else if (tag == TC::TC_PROXYCLASSDESC) {
+        // For simplicity, skip proxy class internals here; you can expand if needed
+        u2 interface_count      [[color(COL_LEN)]];
+        JavaString interfaces[interface_count];
+        // then similar annotation/superclass chain...
+        // (omitted for brevity)
+    }
+} [[name("ObjectStreamClassDesc (recursive)")]];
+
+
 
 // Class descriptor + fields
 struct ClassDesc {
@@ -123,12 +178,84 @@ struct ServerMessageHeader {
     JavaString intentName;
 };
 
+struct ServerId_Role {
+    u1 element_tag;
+
+    if (element_tag == TC::TC_ENUM) {
+        ObjectStreamClassDesc classdesc;
+        JavaString value;
+    }
+    // ObjectStreamClassDesc classdesc; // TODO: this should be an Enum desc not class 
+    
+};
+
+struct ServerId {
+    u1 element_tag;
+
+    if (element_tag == TC::TC_OBJECT) {
+        ObjectStreamClassDesc classdesc;
+        JavaString address;
+        ServerId_Role role;
+    }
+};
+
+struct ServerRouteDetails {
+    ObjectStreamClassDesc classdesc;
+
+    // TODO: should be a "each fields => determine what type to read"
+    std::print("{}", classdesc.body.fieldCount);
+
+    u4 routeDistance;
+    JavaString routePath;
+    ServerId serverAddress;
+
+};
+
+struct BaseSerializedObject {
+    ObjectStreamClassDesc classdesc;
+} [[name("Serialized Java Object")]];
+
+struct SerializedArrayElement<T> {
+    u1 element_tag;
+    if (element_tag == TC::TC_NULL) {
+        // nothing
+    } else if (element_tag == TC::TC_REFERENCE) {
+        u4 handle;
+    } else if (element_tag == TC::TC_OBJECT) {
+        T element_object;
+    } else {
+        // other tag types (e.g., primitive wrappers or strings)
+        u1 raw;
+    }
+};
+
+struct SerializedArray<T> {
+    ObjectStreamClassDesc array_classdesc; // describes the array type, e.g. "[L...;"
+    u4 length;
+    // each element is parsed generically: could be object/null/reference/etc.
+    SerializedArrayElement<T> elements[length];
+} [[name("Serialized Java Array Instance")]];
+
+
+
 // Top-level envelope
-struct JavaSerializedHeader {
+struct ServerMessageHeaderMessage {
     JavaStreamHeader header;
     SerializationStreamHeader magic;
     ServerMessageHeader smh;
     // (after this comes instance data)
 } [[name("Serialized ServerMessageHeader envelope")]];
 
-JavaSerializedHeader root @ 0x0;
+struct ServerRouteDetailsMessage {
+    SerializationStreamHeader magic;
+    // ServerRouteDetails smh;
+    u1 tc_object;              // TC_OBJECT, should be TC_ARRAY
+    if (tc_object == TC::TC_ARRAY) {
+        SerializedArray<ServerRouteDetails> array;
+    } else {
+        std::print("Invalid type, should be an array")
+    }
+} [[name("Serialized ServerMessageHeader envelope")]];
+
+// ServerMessageHeaderMessage root @ 0x0;
+ServerRouteDetailsMessage root @ 0x0;
