@@ -1,5 +1,6 @@
 # File: gan_client.py
 
+import io
 import socket
 import ssl
 import threading
@@ -14,13 +15,16 @@ from metroparser import ProtocolHeader, OpCodes
 
 # --- CONFIGURATION ---
 GATEWAY_HOST = "127.0.0.1"
-GATEWAY_PORT = 8088  # Use 8088 for default non-SSL, 8060 for SSL
+GATEWAY_PORT = 8088  # Use 8088 for default non-SSL
+DATA_CHANNEL_PORT = 8060 
 USE_SSL = False  # Change to True to connect to a default SSL-enabled Gateway
+DATA_USE_SSL = True
 
 # Our client's identity
 CLIENT_NAME = "python-gan-client"
 CLIENT_UUID = "58a5e5bb-a8c3-4e87-a299-297f645c279c"  # str(uuid.uuid4())
 CLIENT_URL = "http://localhost:5088/system"  # A dummy URL for our client
+
 
 
 class GANClient:
@@ -31,6 +35,15 @@ class GANClient:
         self.socket = None
         self.is_connected = False
         self.message_id_counter = 0
+
+    def send(self, msg):
+        print("WS-SEND", msg)
+        return self.socket.send(msg)
+
+    def recv(self, size):
+        msg = self.socket.recv(size)
+        print("WS-RECV", msg)
+        return msg
 
     def connect(self):
         """Establishes the TCP or SSL socket connection."""
@@ -44,11 +57,19 @@ class GANClient:
                 context.verify_mode = ssl.CERT_NONE
                 
                 # Create regular socket first
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Also allow port reuse if the OS supports it
+                try:
+                    self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except (AttributeError, OSError):
+                    pass
+
                 # Wrap with SSL
-                self.socket = context.wrap_socket(sock, server_hostname=self.host)
+                self.socket = context.wrap_socket(self._sock, server_hostname=self.host)
             else:
                 self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._sock = self.socket
             
             self.socket.connect((self.host, self.port))
             self.is_connected = True
@@ -67,19 +88,23 @@ class GANClient:
         path = f"/system/ws-control-servlet?name={CLIENT_NAME}&uuid={CLIENT_UUID}&url={CLIENT_URL}"
         request = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {self.host}:{self.port}\r\n"
+            "Accept-Encoding: gzip\r\n"
+            "User-Agent: Jetty/9.4.24.v20191120\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"
             "Sec-WebSocket-Version: 13\r\n"
+            "Pragma: no-cache\r\n"
+            "Cache-Control: no-cache\r\n"
+            f"Host: {self.host}:{self.port}\r\n"
             "\r\n"
         )
 
         print("[CLIENT] Sending WebSocket handshake request...")
-        self.socket.send(request.encode('utf-8'))
+        self.send(request.encode('utf-8'))
 
         # 3. Read and validate the server's response
-        response = self.socket.recv(1024).decode('utf-8')
+        response = self.recv(1024).decode('utf-8')
         response_lines = response.split('\r\n')
         response_line = response_lines[0]
         
@@ -162,7 +187,7 @@ class GANClient:
         """Helper method to receive exactly 'length' bytes."""
         data = b""
         while len(data) < length:
-            chunk = self.socket.recv(length - len(data))
+            chunk = self.recv(length - len(data))
             if not chunk:
                 break
             data += chunk
@@ -203,16 +228,199 @@ class GANClient:
 
         # Send the frame
         try:
-            self.socket.send(header + masked_payload)
+            self.send(header + masked_payload)
         except Exception as e:
             print(f"[CLIENT] Error sending WebSocket frame: {e}")
+
+    def http_req(
+        self,
+        host: str,
+        port: int,
+        payload: bytes,
+        use_ssl: bool = False,
+        timeout: float = 5.0,
+        verify_cert: bool = False,
+        cafile: None = None,
+        certfile: str ="server.crt",
+        keyfile: str ="server.key",
+    ) -> bytes:
+        """
+        Connects to host:port, optionally wraps in SSL, sends payload, and returns full response.
+        If verify_cert is False, certificate validation is disabled.
+        """
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            if use_ssl:
+                if verify_cert:
+                    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                    if cafile:
+                        context.load_verify_locations(cafile)
+                else:
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+
+                if certfile:
+                    # client cert if needed
+                    context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+                ssock = context.wrap_socket(sock, server_hostname=host)
+            else:
+                ssock = sock
+
+            ssock.settimeout(timeout)
+            ssock.sendall(payload)
+
+            # Read until remote closes or timeout
+            response = bytearray()
+            try:
+                while True:
+                    chunk = ssock.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+            except socket.timeout:
+                # expected when no more data arrives
+                pass
+            except Exception:
+                pass
+
+            return bytes(response)
+
+
+    def get_datachannel(self, msg_id, connectionId):
+        """Performs the GET to the data channel servlet with given id and connectionId."""
+        path = f"/system/ws-datachannel-servlet?id={msg_id}&connectionId={connectionId}"
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {self.host}:{self.port}\r\n"
+            "Connection: Keep-Alive\r\n"
+            "User-Agent: Apache-HttpClient/4.5.11 (Java/11.0.11)\r\n" #  Ignition-GAN-Client/1.0\r\n" ?
+            "Accept-Encoding: gzip,deflate\r\n"
+            "\r\n"
+        )
+
+        try:
+            print(f"[CLIENT-DATA] Sending GET {path}")
+            raw = self.http_req(self.host, DATA_CHANNEL_PORT, request.encode("utf-8"), use_ssl=DATA_USE_SSL)
+            # with socket.create_connection((self.host, DATA_CHANNEL_PORT), timeout=5) as sock:
+            #     if DATA_USE_SSL:
+            #         # Create insecure context (skip cert verification)
+            #         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            #         ctx.check_hostname = False
+            #         ctx.load_cert_chain(certfile="server.crt", keyfile="server.key")
+            #         ctx.verify_mode = ssl.CERT_NONE
+            
+            #         sock = ctx.wrap_socket(sock, server_hostname=self.host)
+                    
+            #     sock.sendall(request.encode("utf-8"))
+
+            #     time.sleep(2)
+
+            #     # Read full response
+            #     try:
+            #         raw = b""
+            #         while True:
+            #             chunk = sock.recv(4096)
+            #             if not chunk:
+            #                 break
+            #             raw += chunk
+            #     except Exception as e:
+            #         pass
+
+            print(raw)
+            with open("CLIENT/CLIENT_GET_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                    file.write(raw)
+
+            # Split headers / body
+            sep = raw.find(b"\r\n\r\n")
+            if sep == -1:
+                print("[CLIENT-DATA] Malformed HTTP response, no header/body separator.")
+                stream = io.BytesIO(bytes(raw))
+                headers_size,  = struct.unpack(">B", stream.read(1))
+                header_length, = struct.unpack(">B", stream.read(1))
+                headers = stream.read(headers_size-1)
+                body = stream.read()
+            else:
+                sizes = raw[:sep].decode("utf-8", errors="ignore")
+                headers = raw[sep + 4 :]
+            
+            print(f"[CLIENT-DATA] Response headers:\n{headers.splitlines()[0]}")
+            # Now interpret the body as Metro frame: protocol header + payload
+            try:
+                header = ProtocolHeader.decode(headers)
+                print(f"[CLIENT-DATA] Datachannel reply header: {repr(header)}")
+                # Further processing of body after header would go here
+                return header, body
+            except Exception as e:
+                print(f"[CLIENT-DATA] Failed to decode ProtocolHeader from GET response: {e}")
+                return None
+        except Exception as e:
+            print(f"[CLIENT-DATA] get_datachannel error: {e}")
+            return None
+
+    def post_to_datachannel(self, data_file_path, message_id):
+        """Connects via HTTP, crafts headers, and POSTs the file content."""
+        try:
+            with open(data_file_path, "rb") as f:
+                post_data = f.read()
+
+            protocol = ProtocolHeader()
+            protocol.message_id = message_id  # new ID ?
+            protocol.opcode = OpCodes.MSG_SEND
+            protocol.subcode = 0
+            protocol.flags = 0
+            protocol.sender_id = CLIENT_NAME
+            # protocol.target_address = "_0:0:Ignition-Forge-DEV"
+            protocol.sender_url = CLIENT_URL  # optional, can be left blank
+
+            post_data = protocol.encode() + post_data
+            content_length = len(post_data)
+            
+            # Use chunked transfer encoding as observed
+            hex_content_length = f"{content_length:x}\r\n".encode('utf-8')
+
+            # Craft the HTTP POST request
+            request_body = hex_content_length + post_data + b"\r\n0\r\n\r\n"
+            
+            # NOTE: The port here should be the one the server's DATA channel is listening on.
+            # This is provided in the `remoteSystemId` header during the WS handshake.
+            # For simplicity, we hardcode it here based on the sniffer server's config.
+            
+            request_headers = (
+                f"POST /system/ws-datachannel-servlet HTTP/1.1\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                f"Host: {self.host}:{DATA_CHANNEL_PORT}\r\n"
+                "Connection: Keep-Alive\r\n"
+                "User-Agent: Apache-HttpClient/4.5.11 (Java/11.0.11)\r\n"
+                # "User-Agent: Ignition-GAN-Client/1.0\r\n"
+                "Accept-Encoding: gzip,deflate\r\n"
+                # "Content-Type: application/octet-stream\r\n"
+                "\r\n"
+            )
+
+            payload = request_headers.encode('utf-8') + request_body
+            response = self.http_req(self.host, DATA_CHANNEL_PORT, payload, use_ssl=DATA_USE_SSL)
+
+            # print(f"[CLIENT-DATA] Connecting to HTTP data channel on port {DATA_CHANNEL_PORT}...")
+            # http_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # http_socket.connect((self.host, DATA_CHANNEL_PORT))
+            
+            # print(f"[CLIENT-DATA] Sending POST request with {content_length} bytes of data.")
+            # http_socket.sendall(request_headers.encode('utf-8'))
+            # http_socket.sendall(request_body)
+
+            # response = http_socket.recv(4096)
+            print("HTTP-RECV", response)
+            print(f"[CLIENT-DATA] Received response: {response.decode('utf-8').splitlines()[0]}")
+            # http_socket.close()
+
+        except Exception as e:
+            print(f"[CLIENT-DATA] Failed to post to data channel: {e}")
 
     def run(self):
         """The main client loop."""
         if not self.connect() or not self._do_websocket_handshake():
             self.disconnect()
             return
-
         try:
             # First, wait for the server's internal handshake
             print("[CLIENT] Waiting for internal handshake from server...")
@@ -229,7 +437,8 @@ class GANClient:
             self._send_websocket_frame(our_handshake_message, is_binary=False)
             print("[CLIENT] Sent our identity back to the server.")
 
-            # Main PING/PONG loop
+            # Phase 3: Main PING loop and data POST
+            ping_count = 0
             while self.is_connected:
                 # Send a PING
                 self.message_id_counter += 1
@@ -245,11 +454,28 @@ class GANClient:
                 response_frame = self._read_websocket_frame(text_mode=False)
                 if response_frame:
                     response_header = ProtocolHeader.decode(response_frame)
-                    if response_header.opcode == OpCodes.OK and response_header.message_id == self.message_id_counter:
+                    if response_header.opcode == OpCodes.OK: # and response_header.message_id == self.message_id_counter:
                         print(f"[CLIENT] Received PONG (ACK): {repr(response_header)}")
+                    elif response_header.opcode == OpCodes.MSG_SEND:
+                        print(f"[CLIENT] Received MSG_SEND: {repr(response_header)}")
+                        print(response_frame)
+                        # TODO: GET response_header.sender_url + "ws-datachannel-servlet" + "?id={response_header.message_id}&connectionId={CLIENT_NAME}"
+                        self.get_datachannel(response_header.message_id, connectionId=CLIENT_NAME)
+
+                        self.post_to_datachannel("POST_datachannel.bin", response_header.message_id)
                     else:
                         print(f"[CLIENT] Received unexpected response: {repr(response_header)}")
                         print(repr(response_frame))
+
+
+                ping_count += 1
+
+                # Check if it's time to POST data
+                # if ping_count == 2:
+                #     print("[CLIENT] Two PINGs sent, preparing to POST data...")
+                #     self.post_to_datachannel("POST_datachannel.bin")
+                #     # For this example, we will disconnect after posting.
+                #     # break
 
                 time.sleep(10)  # Ping every 10 seconds
 
@@ -264,7 +490,7 @@ class GANClient:
             try:
                 # Send close frame
                 close_frame = bytearray([0x88, 0x00])  # FIN + CLOSE opcode, no payload
-                self.socket.send(close_frame)
+                self.send(close_frame)
             except:
                 pass
             self.socket.close()

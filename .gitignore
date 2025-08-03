@@ -11,3 +11,4 @@ server.pem
 *.class
 
 *.log
+*.pyc

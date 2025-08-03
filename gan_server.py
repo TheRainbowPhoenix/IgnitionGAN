@@ -134,6 +134,7 @@ class WebSocketControlHandler:
         try:
            # Read HTTP request
             request_data = self.client_socket.recv(4096*8) # Increased buffer size
+            print("WS-RECV: ", request_data)
             if not request_data:
                 print("[WS-CTRL] No data received during handshake.")
                 return False
@@ -204,7 +205,7 @@ class WebSocketControlHandler:
 
                 print(f"[WS-CTRL] Received POST body of size: {len(ia_obj)} bytes.")
 
-                with open("POST_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                with open("SERVER/POST_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
                     file.write(raw_body)
                 
                 # --- Decode ProtocolHeader ---
@@ -235,6 +236,7 @@ class WebSocketControlHandler:
                         "Connection: close\r\n"
                         "\r\n"
                     )
+                    print("WS-SEND: ", error_response)
                     self.client_socket.send(error_response.encode('utf-8'))
                     return False # Indicate handshake (for this POST path) failed
                 
@@ -255,35 +257,48 @@ class WebSocketControlHandler:
                 target_handler.on_data_received(header, ia_obj) # TODO: should I pass the raw_body ? or the obj ?
 
                 # NEW: send prebuilt reply_frame if exists
+                payload = b""
                 try:
                     response_header = ProtocolHeader()
                     response_header.message_id = header.message_id + 2
-                    response_header.opcode = OpCodes.MSG_SEND
+                    response_header.opcode = OpCodes.OK
                     response_header.sender_id = REMOTE_CONNECTION_ID
                     response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+
+                    # target_handler.send_binary_frame(response_header.encode())
                     
-                    if os.path.exists("reply_frame.bin"):
-                        with open("reply_frame.bin", "rb") as rf:
-                            reply_bytes = rf.read()
-                        print(f"[WS-CTRL] [{self.remote_system_name}] Sending crafted reply_frame.bin back to client.")
-                        payload = response_header.encode() + reply_bytes
+                    # if os.path.exists("reply_frame.bin"):
+                    #     with open("reply_frame.bin", "rb") as rf:
+                    #         reply_bytes = rf.read()
+                    #     print(f"[WS-CTRL] [{self.remote_system_name}] Sending crafted reply_frame.bin back to client.")
+                    #     # payload = response_header.encode() + reply_bytes
                         
-                        with open("REPLY_POST_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
-                            file.write(payload)
-                        print(payload)
-                        target_handler.send_binary_frame(payload)
-                    else:
-                        print(f"[WS-CTRL] [{self.remote_system_name}] reply_frame.bin not found, skipping reply.")
+                    #     # with open("SERVER/REPLY_POST_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                    #     #     file.write(payload)
+                    #     # print(payload)
+                    #     # target_handler.send_binary_frame(payload)
+                    # else:
+                    #     print(f"[WS-CTRL] [{self.remote_system_name}] reply_frame.bin not found, skipping reply.")
+                    payload = response_header.encode()
                 except Exception as e:
                     print(f"[WS-CTRL] Error sending reply_frame.bin: {e}")
+                
+                current_time = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime())
 
                 # Send simple HTTP 200 OK response to the POST
                 ok_response = (
                     "HTTP/1.1 200 OK\r\n"
-                    "Content-Length: 0\r\n"
-                    "Connection: close\r\n"
+                    f"Date: {current_time}\r\n"
+                    "Referrer-Policy: strict-origin-when-cross-origin\r\n"
+                    "X-Content-Type-Options: nosniff\r\n" 
+                    "X-Frame-Options: SAMEORIGIN\r\n"
+                    "X-XSS-Protection: 1; mode=block\r\n"
+                    "Content-Length: %d\r\n"
                     "\r\n"
-                )
+                    "%s"
+                ) % (len(payload), payload)
+
+                print("WS-SEND: ", ok_response)
                 self.client_socket.send(ok_response.encode('utf-8'))
                 print(f"[WS-CTRL] Dispatched POST data to connection '{sender_id}' and sent HTTP 200 OK.")
                 # This path doesn't upgrade to WS, it just handles the POST and closes.
@@ -324,14 +339,23 @@ class WebSocketControlHandler:
                 remote_system_id = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
 
                 # --- Send the 101 Switching Protocols response ---
+                # Get current time in GMT/UTC format
+                current_time = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime())
+                
                 response = (
                     "HTTP/1.1 101 Switching Protocols\r\n"
-                    "Upgrade: websocket\r\n"
+                    f"Date: {current_time}\r\n"
+                    "Referrer-Policy: strict-origin-when-cross-origin\r\n"
+                    "X-Content-Type-Options: nosniff\r\n" 
+                    "X-Frame-Options: SAMEORIGIN\r\n"
+                    "X-XSS-Protection: 1; mode=block\r\n"
                     "Connection: Upgrade\r\n"
                     f"Sec-WebSocket-Accept: {accept_response}\r\n"
-                    f"remoteSystemId: {remote_system_id}\r\n"
+                    "Upgrade: websocket\r\n"
+                    # f"remoteSystemId: {remote_system_id}\r\n"
                     "\r\n"
                 )
+                print("WS-SEND: ", response)
                 self.client_socket.send(response.encode('utf-8'))
                 print(f"[WS-CTRL] WebSocket Handshake successful for '{self.remote_system_name}'. Data channel: {remote_system_id}")
 
@@ -349,34 +373,42 @@ class WebSocketControlHandler:
 
                 print("[WS-CTRL] Received GET for message ID '%s' from '%s'" % (msg_id, conn_id))
 
-                response_header = ProtocolHeader()
-                response_header.message_id = msg_id
-                response_header.opcode = OpCodes.OK # 1
-                response_header.sender_id = REMOTE_CONNECTION_ID
-                response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
-                self.send_binary_frame(response_header.encode())
-
-
-                response_header = ProtocolHeader()
-                response_header.message_id = msg_id
-                response_header.opcode = OpCodes.MSG_SEND
-                response_header.sender_id = REMOTE_CONNECTION_ID
-                response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+                # response_header = ProtocolHeader()
+                # response_header.message_id = msg_id+20
+                # response_header.opcode = OpCodes.MSG_SEND
+                # response_header.sender_id = REMOTE_CONNECTION_ID
+                # response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+                # self.send_binary_frame(response_header.encode())
                 
+
+                # response_header = ProtocolHeader()
+                # response_header.message_id = msg_id
+                # response_header.opcode = OpCodes.OK # 1
+                # response_header.sender_id = REMOTE_CONNECTION_ID
+                # response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+                # self.send_binary_frame(response_header.encode())
+
+                payload = ""
                 if os.path.exists("reply_frame.bin"):
                     with open("reply_frame.bin", "rb") as rf:
                         reply_bytes = rf.read()
-                    print(f"[WS-CTRL] [{self.remote_system_name}] Sending crafted reply_frame.bin back to client.")
-                    payload = response_header.encode() + reply_bytes
                     
-                    with open("REPLY_GET_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
-                        file.write(payload)
+                    print(f"[WS-CTRL] [{self.remote_system_name}] Sending crafted reply_frame.bin back to client.")
+                    payload = reply_bytes # response_header.encode() + reply_bytes
+                    
+                    # with open("SERVER/REPLY_GET_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                    #     file.write(payload)
 
+                current_time = time.strftime('%a, %d %b %Y %H:%M:%S GMT', time.gmtime())
+                
                 response = (
                     "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: application/octet-stream\r\n"
+                    f"Date: {current_time}\r\n"
+                    "Referrer-Policy: strict-origin-when-cross-origin\r\n"
+                    "X-Content-Type-Options: nosniff\r\n" 
+                    "X-Frame-Options: SAMEORIGIN\r\n"
+                    "X-XSS-Protection: 1; mode=block\r\n"
                     "Content-Length: %d\r\n"
-                    "Connection: close\r\n"
                     "\r\n"
                     "%s"
                 ) % (len(payload), payload)
@@ -390,6 +422,7 @@ class WebSocketControlHandler:
                     "Connection: close\r\n"
                     "\r\n"
                 )
+                print("WS-SEND: ", not_found_response)
                 self.client_socket.send(not_found_response.encode('utf-8'))
                 return False
         except Exception as e:
@@ -401,6 +434,7 @@ class WebSocketControlHandler:
                     "Connection: close\r\n"
                     "\r\n"
                 )
+                print("WS-SEND: ", error_response)
                 self.client_socket.send(error_response.encode('utf-8'))
             except:
                 pass # Ignore errors sending error response
@@ -454,6 +488,7 @@ class WebSocketControlHandler:
             if not chunk:
                 break
             data += chunk
+        print("WS-RECV (all): ", data)
         return data
 
     def _send_frame(self, payload_bytes, opcode):
@@ -478,6 +513,7 @@ class WebSocketControlHandler:
 
         # Send the frame
         try:
+            print("WS-SEND (frame): ", header + payload_bytes)
             self.client_socket.send(header + payload_bytes)
         except Exception as e:
             print(f"[WS-CTRL] Error sending WebSocket frame: {e}")
@@ -492,7 +528,7 @@ class WebSocketControlHandler:
         print(f"[WS-CTRL] Sending BINARY frame of size: {len(message_bytes)}")
         self._send_frame(message_bytes, 0x2)
 
-    def create_pong_response(self, original_message_id):
+    def create_pong_response(self, original_message_id) -> ProtocolHeader:
         """Constructs a PONG (ACK) frame in response to a PING."""
         # Simplified PONG response
         response_header = ProtocolHeader()
@@ -500,9 +536,20 @@ class WebSocketControlHandler:
         response_header.opcode = OpCodes.OK
         response_header.sender_id = REMOTE_CONNECTION_ID
         response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
-        return response_header.encode()
+        return response_header
+
+    def create_data_msg(self, original_message_id) -> ProtocolHeader:
+        """Constructs a PONG (ACK) frame in response to a PING."""
+        # Simplified PONG response
+        response_header = ProtocolHeader()
+        response_header.message_id = original_message_id
+        response_header.opcode = OpCodes.MSG_SEND
+        response_header.sender_id = REMOTE_CONNECTION_ID
+        response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+        return response_header
 
     def run(self):
+        client_states = {}
         try:
             # Step 1: Perform the WebSocket (HTTP) handshake.
             if not self.handle_handshake():
@@ -535,10 +582,18 @@ class WebSocketControlHandler:
                     continue
 
                 if header.opcode == OpCodes.PING:
-                    print(f"[WS-CTRL] [{self.remote_system_name}] Received PING")
-                    pong_message_bytes = self.create_pong_response(header.message_id)
-                    self.send_binary_frame(pong_message_bytes)
-                    print(f"[WS-CTRL] [{self.remote_system_name}] Sent PONG (ACK)")
+                    print(f"[WS-CTRL] [{self.remote_system_name}] Received PING: {header}")
+
+                    if not client_states.get(self.remote_system_name):
+                        client_states[self.remote_system_name] = True
+
+                        data_header = self.create_data_msg(header.message_id)
+                        self.send_binary_frame(data_header.encode())
+                        print(f"[WS-CTRL] [{self.remote_system_name}] Sent MSG_SEND: {data_header}")
+
+                    pong_header = self.create_pong_response(header.message_id)
+                    self.send_binary_frame(pong_header.encode())
+                    print(f"[WS-CTRL] [{self.remote_system_name}] Sent PONG (ACK): {pong_header}")
 
                 elif header.opcode == OpCodes.SHUTDOWN:
                     print(f"[WS-CTRL] [{self.remote_system_name}] Received SHUTDOWN command: {repr(header)}")
@@ -576,6 +631,7 @@ class WebSocketControlHandler:
             # --- Unregister the connection ---
             if hasattr(self, 'remote_system_name') and self.remote_system_name:
                 with connections_lock:
+                    client_states[self.remote_system_name] = False
                     if self.remote_system_name in active_connections:
                         del active_connections[self.remote_system_name]
                 print(f"[WS-CTRL] Unregistered connection: {self.remote_system_name}")
@@ -595,6 +651,7 @@ class HttpDataHandler:
         try:
             # Read HTTP request
             request_data = self.client_socket.recv(4096)
+            print("HTTP-RECV: ", request_data)
             
             # Parse headers to find content length
             headers_end = request_data.find(b'\r\n\r\n')
@@ -620,6 +677,7 @@ class HttpDataHandler:
                 "Connection: close\r\n"
                 "\r\n"
             )
+            print("HTTP-SEND: ", response)
             self.client_socket.send(response.encode('utf-8'))
 
         except Exception as e:
