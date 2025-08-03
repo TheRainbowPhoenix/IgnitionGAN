@@ -57,17 +57,6 @@ struct MetroMessage {
      be u32 unk2;
 };
 
-struct MetroFrame {
-    ProtocolHeader header;
-
-    // Any data that comes after the header is the message body.
-    // For PING frames, this will be empty.
-    if (header.opCode == 3) {
-        MetroMessage msg;
-    }
-};
-
-
 // Outer header (version + length)
 struct JavaStreamHeader {
     u4 version [[color(COL_LEN)]];
@@ -314,6 +303,19 @@ struct ServerMessageHeaderMessage {
     // (after this comes instance data)
 } [[name("Serialized ServerMessageHeader envelope")]];
 
+
+struct MetroFrame {
+    ProtocolHeader header;
+
+    // Any data that comes after the header is the message body.
+    // For PING frames, this will be empty.
+    if (header.opCode == 3) {
+        // MetroMessage msg;
+       ServerMessageHeaderMessage root;
+    }
+};
+
+
 // ServerMessageHeaderMessage root @ 0x0;
 MetroFrame mf0 @0x05;
-ServerMessageHeaderMessage root @ 0x84;
+// ServerMessageHeaderMessage root @ 0x84;

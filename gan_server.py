@@ -7,7 +7,7 @@ import hashlib
 import base64
 import struct
 import os
-from typing import Dict
+from typing import Dict, Union
 from urllib.parse import urlparse, parse_qs
 
 # --- CONFIGURATION ---
@@ -61,7 +61,7 @@ def generate_ssl_files():
 
 # A simplified handler for a single client connection
 class WebSocketControlHandler:
-    def __init__(self, client_socket, remote_system_name: str | None=None):
+    def __init__(self, client_socket, remote_system_name: Union[str, None]=None):
         self.client_socket = client_socket
         self.remote_system_name = remote_system_name
         self.running = True
@@ -173,7 +173,7 @@ class WebSocketControlHandler:
                     if key.strip().lower() == 'content-length':
                         content_length = int(value.strip())
 
-
+            # TODO: move the post / get handlers ? 
             # --- Handle POST to /system/ws-datachannel-servlet ---
             if method == "POST" and path_and_query.startswith("/system/ws-datachannel-servlet"):
                 print("[WS-CTRL] Handling POST to data channel servlet.")
@@ -254,6 +254,29 @@ class WebSocketControlHandler:
                 # Pass the header we already decoded and the raw body
                 target_handler.on_data_received(header, ia_obj) # TODO: should I pass the raw_body ? or the obj ?
 
+                # NEW: send prebuilt reply_frame if exists
+                try:
+                    response_header = ProtocolHeader()
+                    response_header.message_id = header.message_id + 2
+                    response_header.opcode = OpCodes.MSG_SEND
+                    response_header.sender_id = REMOTE_CONNECTION_ID
+                    response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+                    
+                    if os.path.exists("reply_frame.bin"):
+                        with open("reply_frame.bin", "rb") as rf:
+                            reply_bytes = rf.read()
+                        print(f"[WS-CTRL] [{self.remote_system_name}] Sending crafted reply_frame.bin back to client.")
+                        payload = response_header.encode() + reply_bytes
+                        
+                        with open("REPLY_POST_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                            file.write(payload)
+                        print(payload)
+                        target_handler.send_binary_frame(payload)
+                    else:
+                        print(f"[WS-CTRL] [{self.remote_system_name}] reply_frame.bin not found, skipping reply.")
+                except Exception as e:
+                    print(f"[WS-CTRL] Error sending reply_frame.bin: {e}")
+
                 # Send simple HTTP 200 OK response to the POST
                 ok_response = (
                     "HTTP/1.1 200 OK\r\n"
@@ -318,6 +341,46 @@ class WebSocketControlHandler:
                 print(f"[WS-CTRL] Registered connection: {self.remote_system_name}")
 
                 return True # Signal successful WS handshake
+            elif method == "GET" and path_and_query.startswith("/system/ws-datachannel-servlet"):
+                parsed_url = urlparse(path_and_query)
+                query_params = parse_qs(parsed_url.query)
+                msg_id = int(query_params.get('id', [None])[0])
+                conn_id = query_params.get('connectionId', [None])[0]
+
+                print("[WS-CTRL] Received GET for message ID '%s' from '%s'" % (msg_id, conn_id))
+
+                response_header = ProtocolHeader()
+                response_header.message_id = msg_id
+                response_header.opcode = OpCodes.OK # 1
+                response_header.sender_id = REMOTE_CONNECTION_ID
+                response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+                self.send_binary_frame(response_header.encode())
+
+
+                response_header = ProtocolHeader()
+                response_header.message_id = msg_id
+                response_header.opcode = OpCodes.MSG_SEND
+                response_header.sender_id = REMOTE_CONNECTION_ID
+                response_header.sender_url = f"http://{SERVER_ADDRESS}:{HTTP_DATA_PORT}/system"
+                
+                if os.path.exists("reply_frame.bin"):
+                    with open("reply_frame.bin", "rb") as rf:
+                        reply_bytes = rf.read()
+                    print(f"[WS-CTRL] [{self.remote_system_name}] Sending crafted reply_frame.bin back to client.")
+                    payload = response_header.encode() + reply_bytes
+                    
+                    with open("REPLY_GET_data{}.bin".format(time.time()), 'ab') as file:  # 'ab' for append binary
+                        file.write(payload)
+
+                response = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: application/octet-stream\r\n"
+                    "Content-Length: %d\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "%s"
+                ) % (len(payload), payload)
+                
             else:
                 print(f"[WS-CTRL] Unsupported method ({method}) or path ({path_and_query}).")
                 # Send 404 or 405?
